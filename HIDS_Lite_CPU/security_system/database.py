@@ -3,7 +3,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from uuid import uuid4
 
 import cv2
 
@@ -16,6 +15,10 @@ class DatabaseManager:
         self.connection: Optional[sqlite3.Connection] = None
         self.snapshots_dir = Path("stored_snapshots")
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        
+        # State tracking variables to prevent spamming logs every second
+        self.last_status: Optional[str] = None
+        self.last_person: Optional[str] = None
 
     def initialize(self) -> None:
         """Initialize SQLite database and required table."""
@@ -35,9 +38,10 @@ class DatabaseManager:
 
     def _create_tables(self) -> None:
         """Create activity_logs table if it does not exist."""
+        # CHANGED: log_id is now an auto-incrementing integer instead of a text UUID
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS activity_logs (
-            log_id TEXT PRIMARY KEY,
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
             person_name TEXT NOT NULL,
@@ -48,20 +52,18 @@ class DatabaseManager:
         cursor.execute(create_table_sql)
         self.connection.commit()
 
-    def generate_uuid(self) -> str:
-        """Generate a new UUID for an event."""
-        return str(uuid4())
-
     def current_timestamp(self) -> str:
         """Return the current timestamp in ISO 8601 format."""
         return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-    def save_snapshot(self, frame, event_uuid: str, timestamp: str) -> str:
+    def save_snapshot(self, frame, timestamp: str, person_name: str) -> str:
         """Save the current video frame to disk and return the relative path."""
         timestamp_safe = datetime.fromisoformat(timestamp.replace("Z", "")).strftime(
             "%Y%m%d_%H%M%S"
         )
-        filename = f"{timestamp_safe}_{event_uuid}.jpg"
+        # CHANGED: Replaced event_uuid with person_name for a cleaner file name
+        safe_name = person_name.replace(" ", "_")
+        filename = f"{timestamp_safe}_{safe_name}.jpg"
         snapshot_path = self.snapshots_dir / filename
         try:
             success = self._write_jpeg(frame, str(snapshot_path))
@@ -72,28 +74,41 @@ class DatabaseManager:
             raise
         return str(snapshot_path)
 
-    def insert_activity_log(
+    def process_and_log_event(
         self,
-        log_id: str,
+        frame,
         timestamp: str,
         status: str,
         person_name: str,
-        image_path: str,
-    ) -> None:
-        """Insert a detection event into the database."""
+    ) -> bool:
+        """
+        Evaluate the current state and insert a log ONLY if the state has changed.
+        Returns True if a log was written, False if skipped.
+        """
+        # STATE-CHANGE LOGIC: Check if the current person/status is identical to the last one
+        if status == self.last_status and person_name == self.last_person:
+            return False  # No change. Skip logging to prevent overflow!
+
+        # If we reach here, the state HAS changed. Update the trackers.
+        self.last_status = status
+        self.last_person = person_name
+
+        # Save the snapshot ONLY when the state changes
+        image_path = self.save_snapshot(frame, timestamp, person_name)
+
+        # CHANGED: Removed log_id from the INSERT statement because SQLite handles it automatically
         insert_sql = """
-        INSERT INTO activity_logs (log_id, timestamp, status, person_name, image_path)
-        VALUES (?, ?, ?, ?, ?);
+        INSERT INTO activity_logs (timestamp, status, person_name, image_path)
+        VALUES (?, ?, ?, ?);
         """
         try:
             with self.connection:
                 self.connection.execute(
                     insert_sql,
-                    (log_id, timestamp, status, person_name, image_path),
+                    (timestamp, status, person_name, image_path),
                 )
-            logging.info("Logged event %s as %s", log_id, status)
-        except sqlite3.IntegrityError:
-            logging.warning("Duplicate log_id detected: %s", log_id)
+            logging.info("State Changed! Logged event as %s (%s)", status, person_name)
+            return True
         except sqlite3.OperationalError as exc:
             logging.exception("Database operational error: %s", exc)
             raise

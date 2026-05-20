@@ -1,6 +1,6 @@
 import logging
 import os
-import time  # <-- FIXED: Added for alert cooldown tracking
+import time  
 from dotenv import load_dotenv
 from security_system.camera import CameraStreamer
 from security_system.database import DatabaseManager
@@ -43,19 +43,19 @@ def main() -> None:
 
     streamer = CameraStreamer(stream_url=stream_url)
 
-    # --- FIXED: Cooldown configuration parameters ---
     last_alert_time = 0.0
-    ALERT_COOLDOWN_SECONDS = 30.0  # Limits alerts to 1 per 30 seconds
-    # ------------------------------------------------
+    ALERT_COOLDOWN_SECONDS = 30.0  
+    
+    # --- NEW: Memory tracker for the last unknown face ---
+    last_unknown_encoding = None
 
-    logging.info("Starting Human Intervention & Intrusion Detection System...")
+    logging.info("Starting HIDS-Vision System...")
     try:
         streamer.start_stream()
 
         while True:
             frame = streamer.read_frame()
             if frame is None:
-                logging.warning("Frame not available, retrying...")
                 continue
 
             detections = detector.detect_persons(frame)
@@ -64,38 +64,54 @@ def main() -> None:
 
             for detection in detections:
                 bbox = detection["bbox"]
-                confidence = detection["confidence"]
-                logging.info(
-                    f"Person detected with confidence={confidence:.2f}, bbox={bbox}. Running biometric verification."
-                )
-
+                
                 crop = face_manager.crop_face_region(frame, bbox)
-                status, name = face_manager.verify_face(crop)
-
-                event_uuid = database.generate_uuid()
+                
+                # --- NEW: Unpacking the current_encoding for mathematical comparison ---
+                status, name, current_encoding = face_manager.verify_face(crop)
                 timestamp = database.current_timestamp()
-                snapshot_path = database.save_snapshot(frame, event_uuid, timestamp)
 
-                # Always log every transaction to the SQLite database
-                database.insert_activity_log(
-                    log_id=event_uuid,
+                # Step 1: Database State-Change Logging
+                database.process_and_log_event(
+                    frame=frame,
                     timestamp=timestamp,
                     status=status,
                     person_name=name,
-                    image_path=snapshot_path,
                 )
 
-                # Trigger notifications for Unknown individuals using a time cooldown fence
+                # Step 2: Advanced Notification Logic
                 if status == "Unknown":
                     current_time = time.time()
-                    if current_time - last_alert_time > ALERT_COOLDOWN_SECONDS:
-                        logging.info("Sending Telegram alert for unknown person.")
+                    cooldown_expired = (current_time - last_alert_time > ALERT_COOLDOWN_SECONDS)
+                    
+                    # --- NEW: Cooldown Bypass Logic ---
+                    is_new_intruder = False
+                    if current_encoding is not None:
+                        if last_unknown_encoding is None:
+                            is_new_intruder = True # First time seeing any unknown
+                        elif face_manager.are_encodings_different(last_unknown_encoding, current_encoding):
+                            is_new_intruder = True # Mathematical proof it is a different person
+
+                    # Trigger alert if the timer is up, OR if a brand new intruder stepped in frame
+                    if cooldown_expired or is_new_intruder:
+                        
+                        if is_new_intruder and not cooldown_expired:
+                            logging.warning("🚨 COOLDOWN BYPASSED: A second, distinct intruder was detected!")
+                        else:
+                            logging.info("Sending Telegram alert for unknown person.")
+                        
+                        alert_image_path = database.save_snapshot(frame, timestamp, name)
+                        
                         notifier.send_intrusion_alert(
                             timestamp=timestamp,
                             person_name=name,
-                            image_path=snapshot_path,
+                            image_path=alert_image_path,
                         )
-                        last_alert_time = current_time  # Update timestamp of last alert sent
+                        
+                        # Reset the timer and update the facial memory to the new intruder
+                        last_alert_time = current_time  
+                        last_unknown_encoding = current_encoding
+                        
                     else:
                         time_left = ALERT_COOLDOWN_SECONDS - (current_time - last_alert_time)
                         logging.info(
