@@ -45,8 +45,6 @@ def main() -> None:
 
     last_alert_time = 0.0
     ALERT_COOLDOWN_SECONDS = 30.0  
-    
-    # --- NEW: Memory tracker for the last unknown face ---
     last_unknown_encoding = None
 
     logging.info("Starting HIDS-Vision System...")
@@ -64,12 +62,14 @@ def main() -> None:
 
             for detection in detections:
                 bbox = detection["bbox"]
-                
                 crop = face_manager.crop_face_region(frame, bbox)
                 
-                # --- NEW: Unpacking the current_encoding for mathematical comparison ---
                 status, name, current_encoding = face_manager.verify_face(crop)
                 timestamp = database.current_timestamp()
+
+                # --- OPTIMIZATION: Filter out bad light frames from database and alerts ---
+                if status == "Underexposed":
+                    continue
 
                 # Step 1: Database State-Change Logging
                 database.process_and_log_event(
@@ -84,17 +84,14 @@ def main() -> None:
                     current_time = time.time()
                     cooldown_expired = (current_time - last_alert_time > ALERT_COOLDOWN_SECONDS)
                     
-                    # --- NEW: Cooldown Bypass Logic ---
                     is_new_intruder = False
                     if current_encoding is not None:
                         if last_unknown_encoding is None:
-                            is_new_intruder = True # First time seeing any unknown
+                            is_new_intruder = True 
                         elif face_manager.are_encodings_different(last_unknown_encoding, current_encoding):
-                            is_new_intruder = True # Mathematical proof it is a different person
+                            is_new_intruder = True 
 
-                    # Trigger alert if the timer is up, OR if a brand new intruder stepped in frame
                     if cooldown_expired or is_new_intruder:
-                        
                         if is_new_intruder and not cooldown_expired:
                             logging.warning("🚨 COOLDOWN BYPASSED: A second, distinct intruder was detected!")
                         else:
@@ -108,10 +105,8 @@ def main() -> None:
                             image_path=alert_image_path,
                         )
                         
-                        # Reset the timer and update the facial memory to the new intruder
                         last_alert_time = current_time  
                         last_unknown_encoding = current_encoding
-                        
                     else:
                         time_left = ALERT_COOLDOWN_SECONDS - (current_time - last_alert_time)
                         logging.info(

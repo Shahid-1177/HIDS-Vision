@@ -10,9 +10,6 @@ class FaceRecognitionManager:
         self.tolerance = tolerance
         self.authorized_encodings = []
         self.authorized_names = []
-        
-        # --- NEW: Initialize Contrast Enhancer ---
-        # Clip limit prevents noise over-amplification; 8x8 grid is standard for faces
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     def load_authorized_faces(self):
@@ -36,32 +33,29 @@ class FaceRecognitionManager:
                 else:
                     logging.warning(f"No face found in {filename}. Skipping.")
 
+    def check_brightness(self, face_crop):
+        """Calculates average brightness of the face crop."""
+        if face_crop is None or face_crop.size == 0:
+            return 0
+        gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+        return np.mean(gray)
+
     def enhance_image(self, face_crop):
-        """
-        --- NEW: Applies CLAHE to the L channel of LAB color space ---
-        This fixes the 'dropping frames' issue in poor lighting without ruining colors.
-        """
+        """Applies CLAHE to the L channel of LAB color space."""
         if face_crop is None or face_crop.size == 0:
             return face_crop
 
-        # Convert from BGR (OpenCV default) to LAB color space
         lab = cv2.cvtColor(face_crop, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab)
-
-        # Apply Contrast Enhancement ONLY to the lightness channel
         l_enhanced = self.clahe.apply(l_channel)
-
-        # Merge back and convert to standard BGR
         merged = cv2.merge((l_enhanced, a_channel, b_channel))
-        enhanced_bgr = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-        return enhanced_bgr
+        return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
     def crop_face_region(self, frame, bbox):
-        """Crops the face with an optimized 20-pixel padding to catch the whole head."""
+        """Crops the face with an optimized 20-pixel padding."""
         x1, y1, x2, y2 = bbox
         h, w, _ = frame.shape
         
-        # --- NEW: Added Padding logic to stabilize recognition ---
         pad = 20
         x1 = max(0, int(x1) - pad)
         y1 = max(0, int(y1) - pad)
@@ -75,18 +69,24 @@ class FaceRecognitionManager:
         Verifies the face against authorized encodings.
         Returns: (status, name, face_encoding)
         """
-        # Apply the contrast enhancement before the neural network sees it
+        if face_crop is None or face_crop.size == 0:
+            return "Unknown", "Unknown", None
+
+        # --- OPTIMIZATION: Check if the crop is a dark silhouette ---
+        avg_brightness = self.check_brightness(face_crop)
+        if avg_brightness < 45.0: # 45 out of 255 represents severe underexposure
+            logging.warning(f"Face crop too dark ({avg_brightness:.1f}/255). Skipping classification.")
+            return "Underexposed", "Low Light", None
+
         enhanced_crop = self.enhance_image(face_crop)
         rgb_crop = cv2.cvtColor(enhanced_crop, cv2.COLOR_BGR2RGB)
 
         locations = face_recognition.face_locations(rgb_crop, model="hog")
         encodings = face_recognition.face_encodings(rgb_crop, locations)
 
-        # If it still can't find a face, return None for the encoding
         if not encodings:
             return "Unknown", "Unknown", None
 
-        # Grab the first face found in the crop
         current_encoding = encodings[0]
 
         if not self.authorized_encodings:
@@ -107,12 +107,7 @@ class FaceRecognitionManager:
         return "Unknown", "Unknown", current_encoding
 
     def are_encodings_different(self, encoding1, encoding2, strictness=0.6):
-        """
-        --- NEW: Math comparison for two Unknown faces ---
-        Returns True if the distance between two faces is greater than the strictness.
-        """
         if encoding1 is None or encoding2 is None:
             return False
-        
         distance = face_recognition.face_distance([encoding1], encoding2)[0]
         return distance > strictness
