@@ -1,7 +1,5 @@
-opencv-python<4.10
-ultralytics
-face_recognition
+deepface
+tensorflow==2.10.1
+opencv-python
 python-dotenv
-requests
-pillow
-numpy<2.0.0
+ultralytics
