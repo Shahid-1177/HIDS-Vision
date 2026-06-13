@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -53,8 +53,9 @@ class DatabaseManager:
         self.connection.commit()
 
     def current_timestamp(self) -> str:
-        """Return the current timestamp in ISO 8601 format."""
-        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        """Return the current timestamp in Indian Standard Time (UTC+05:30) in ISO 8601 format."""
+        ist = timezone(timedelta(hours=5, minutes=30))
+        return datetime.now(ist).isoformat(timespec="seconds")
 
     def save_snapshot(self, frame, timestamp: str, person_name: str) -> str:
         """Save the current video frame to disk and return the relative path."""

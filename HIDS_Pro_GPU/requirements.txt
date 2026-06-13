@@ -1,5 +1,6 @@
 deepface
 tensorflow==2.10.1
+numpy<2.0.0
 opencv-python
 python-dotenv
 ultralytics
