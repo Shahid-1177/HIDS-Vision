@@ -11,4 +11,5 @@ security_system/__pycache__/
 yolov8n.pt
 .ipynb_checkpoints/
 authorized_faces/
-
+*.db-shm
+*.db-wal
